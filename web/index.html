@@ -1,0 +1,333 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8">
+		<title>easydrv data</title>
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<link rel="stylesheet" href="./uPlot.min.css">
+		<style>
+		.button {
+		  background-color: #4CAF50; /* Green */
+		  border: none;
+		  color: white;
+		  padding: 15px 32px;
+		  text-align: center;
+		  text-decoration: none;
+		  display: inline-block;
+		  font-size: 16px;
+		  margin: 4px 2px;
+		  cursor: pointer;
+		}
+		.center-50 {
+		  display: flex;
+  		  justify-content: center;
+  		  margin: auto;
+		  width: 50%;
+		}
+		.center-800 {
+		  display: flex;
+  		  justify-content: center;
+  		  margin: auto;
+  		  width: 800;
+		}
+		.uplot {
+  		  margin: auto;
+		}
+		td {
+			padding: 15px 15px;
+		}
+		</style>
+		
+	</head>
+	<body>
+		<script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.js" type="text/javascript"></script>
+		<script src="./uPlot.iife.js"></script>
+		<h2 id="wait">Loading lib....</h2>
+		<table class="center-800">
+		    <tr>
+		      <td>
+			<strong>PWM drive:</strong>
+		      </td>
+		      <td>
+			<select name="state" id="state">
+			  <option value="0">Coast</option>
+			  <option value="34">Forward -  Forward</option>
+			  <option value="33">Forward -  Reverse</option>
+			  <option value="17">Reverse -  Reverse</option>
+			  <option value="51">Break   -  Break</option>
+			</select>
+		      </td>
+		      <td>
+			<label for="dutycycle1">duty cycle 1:</label>
+			<input type="number" id="dutycycle1" name="dutycycle1" value="50" min="0" max="255" step="1" />
+			<label for="dutycycle2">duty cycle 2:</label>
+			<input type="number" id="dutycycle2" name="dutycycle2" value="50" min="0" max="255" step="1" />
+		      </td>
+		   </tr>
+		    <tr>
+		      <td>
+			<strong>PID pos:</strong>
+		      </td>
+		      <td>
+			<label for="kp">Kp:</label>
+			<input type="number" value="0.1" min=0 max=10 id="kp" name ="kp" />
+			<label for="ki">Ki:</label>
+			<input type="number" value="0" min=0 max=10 id="ki" name ="ki" />
+			<label for="kd">Kd:</label>
+			<input type="number" value="0" min=0 max=10 id="kd" name ="kd" />
+		      </td>
+		      <td>
+			<label for="set1">Set 1</label>
+			<input type="number" value="0" min=-10000 max=10000 id="set1" name ="set1" />
+			<label for="set2">Set 2</label>
+			<input type="number" value="0" min=-10000 max=10000 id="set2" name ="set2" />
+		      </td>
+		   </tr>
+		  </table>
+		<div class="center-50">
+			<button class="button" onclick="powerOff();">Off</button>
+			<button class="button" onclick="powerOn();">On</button>
+			<button class="button" onclick="resetPosAndData();">Reset</button>
+			<button class="button" onclick="pwmDrive();">PWM drive</button>
+			<button class="button" onclick="pidDrive1();">PID to position</button>
+			<button class="button" onclick="pidDrive2();">PID to speed</button>
+		</div>
+		<div id="graph"></div>
+		
+		<script>
+			/*
+			  callbacks for mqtt client
+			 */
+			// connection lost
+			function onConnectionLost(responseObject) {
+				console.log("connection lost: " + responseObject.errorMessage);
+				//window.setTimeout(location.reload(),20000); //wait 20seconds before trying to connect again.
+			};
+			function pushpos1(x,y) {
+				data[0].push(x);
+				data[1].push(y);
+				data[2].push(null);
+			}
+			function pushpos2(x,y) {
+				data[0].push(x);
+				data[1].push(null);
+				data[2].push(y);
+			}
+			// incoming data
+			function onMessageArrived(message) {
+				console.log(message.destinationName, '',message.payloadString);
+				var values = message.payloadString.split(" ", 6);
+				//let now = Date.now() / 1000.0; //timestamp as float with ms information
+				var nt=0;
+				var changed=0;
+				if (values[2] != old_pos1) {
+					changed+=1;
+					old_pos1=values[2];
+					nt+=1;
+				}
+				if (values[3] != old_pos2) {
+					changed+=2;
+					old_pos2=values[3];
+					nt+=1;
+				}
+				if (changed==1) {
+					pushpos1(values[0],values[2]);
+				} else if (changed==2) {
+					pushpos2(values[1],values[3]);
+				} else {
+					if (values[0] < values[1]) {
+						pushpos1(values[0],values[2]);
+						pushpos2(values[1],values[3]);
+					} else {
+						pushpos2(values[1],values[3]);
+						pushpos1(values[0],values[2]);
+					}				
+				}
+				let now = Math.max(values[0],values[1]);
+				//  || (data[0].length==1 && (now-data[0][0] > 10)
+				if (data[0].length >= 100 ) {
+					for (let j=0;j<nt;j++) {
+						for (let i=0;i<3;i++) {
+							data[i].shift();
+						}
+					}
+
+				}
+				if ( now - last_plot_time > 0.1) { // don't update with every data coming in, 10Hz should be enough
+					uplot1.setData(data);
+					last_plot_time = now;
+				}
+				
+			};
+			
+			/*
+			 send commands to mqtt broker
+			 */
+			 function sendMessage(dest, message) {
+			 	mess = new Paho.MQTT.Message(message);
+				mess.destinationName=dest;
+				client.send(mess);
+			 }
+			 // switch of driver and sensor power
+			 function powerOff() {
+			 	sendMessage("easydrv/power", "off");
+			 };
+			 // switch of driver and sensor power
+			 function powerOn() {
+			 	sendMessage("easydrv/power", "on");
+			 };
+			 // rest positions and time to 0
+			 function resetPosAndData() {
+			 	sendMessage("easydrv/resetpos", "0 0");
+				sendMessage("easydrv/duty12", "0 0");
+				sendMessage("easydrv/setmode", "0 0 0");
+				prepDataEmpty();
+				last_plot_time=0;
+				uplot1.setData(data);
+	
+			 };
+			 // pwm drive just sends duty cycle to each motor
+			 function pwmDrive() {
+			 	var duty1 = document.getElementById("dutycycle1").value;
+				var duty2 = document.getElementById("dutycycle2").value;
+				var state = document.getElementById("state").value;
+				// pwm mode = x,y,0 
+				sendMessage("easydrv/setmode", "0 0 0");
+				sendMessage("easydrv/state", state);
+				sendMessage("easydrv/duty12", duty1 + " " + duty2);
+			};
+			// go to positions set1 & set2
+			function pidDrive1() {
+				var kp = document.getElementById("kp").value;
+				var ki = document.getElementById("ki").value;
+				var kd = document.getElementById("kd").value;
+				var set1 = document.getElementById("set1").value;
+				var set2 = document.getElementById("set2").value;
+				resetPosAndData();
+				// 
+				sendMessage("easydrv/pidpars", kp+" "+ki+" "+kd);
+				sendMessage("easydrv/setmode", set1+" "+set2+" 1");
+			};
+			// rotate with speed set1 & set2
+			function pidDrive2() {
+				var kp = document.getElementById("kp").value;
+				var ki = document.getElementById("ki").value;
+				var kd = document.getElementById("kd").value;
+				var set1 = document.getElementById("set1").value;
+				var set2 = document.getElementById("set2").value;
+				resetPosAndData();
+				// 
+				sendMessage("easydrv/pidpars", kp+" "+ki+" "+kd);
+				sendMessage("easydrv/setmode", set1+" "+set2+" 2");
+			};
+			// reset data array to contain just one "0" element
+			function prepDataEmpty() {
+				console.time('prep');
+				data = [
+					Array(1),
+					Array(1),
+					Array(1),
+				];
+
+				data[0][0] = 0;
+				data[1][0] = 0;
+				data[2][0] = 0;
+
+				console.timeEnd('prep');
+
+			}
+
+			function makeChart(data) {
+				console.time('chart');
+				const opts = {
+					//title: "easydrv data",
+					width: 800,
+					height: 300,
+					cursor: {
+						drag: {
+							setScale: false,
+						}
+					},
+					select: {
+						show: false,
+					},
+					scales: {
+					        "x": {
+					               time: false,
+					        }
+					},
+					series: [
+						{},
+						{
+							label: "pos1",
+							scale: "pos",
+							value: (u, v) => v == null ? "-" : v,
+							spanGaps: true,
+							stroke: "red",
+						},
+						{
+							label: "pos2",
+							scale: "pos",
+							value: (u, v) => v == null ? "-" : v,
+							spanGaps: true,
+							stroke: "green",
+						}
+						
+					],
+					axes: [
+						{},
+						{
+							scale: 'pos',
+							size: 100,
+							values: (u, vals) => vals.map(v => v.toFixed(1)),
+						},
+					]
+				};
+
+				let uplot1 = new uPlot(opts, data, document.body); // document.body
+
+				//wait.textContent = "Done!";
+				console.timeEnd('chart');
+				return uplot1;
+			}
+			
+			var data;
+			prepDataEmpty();
+			let uplot1 = makeChart(data);
+			
+			let last_plot_time = 0; //Date.now()/1000.0;
+			let old_pos1=-1;
+			let old_pos2=-1;
+			let wait = document.getElementById("wait");
+			wait.textContent = "connecting to mqtt broker..";
+			
+			//mqtt broker 
+			var MQTTbroker = 'localhost';
+			var MQTTport = 9001;
+			var MQTTsubTopic = 'easydrv/encall'; 
+			var client = new Paho.MQTT.Client(MQTTbroker, MQTTport,
+						"myclientid_" + parseInt(Math.random() * 100, 10));
+			client.onMessageArrived = onMessageArrived;
+			client.onConnectionLost = onConnectionLost;	
+			
+			var options = {
+				timeout: 10,
+				onSuccess: function () {
+					console.log("mqtt connected");
+					wait.textContent = "";
+					// Connection succeeded; subscribe to our topics
+					client.subscribe(MQTTsubTopic, {qos: 1});
+				},
+				onFailure: function (message) {
+					console.log("Connection failed, ERROR: " + message.errorMessage);
+					wait.textContent = "Connection failed, check console log.";
+					//window.setTimeout(location.reload(),20000); //wait 20seconds before trying to connect again.
+				}
+			};
+			
+			client.connect(options);
+
+
+		</script>
+	</body>
+</html>
